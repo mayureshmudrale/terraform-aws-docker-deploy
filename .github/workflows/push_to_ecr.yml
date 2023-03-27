@@ -1,87 +1,78 @@
-name: "Deploy Application Changes"
-
+name: Deploy to Amazon ECS fargate
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - master
+env:
+  AWS_REGION: ap-south-1
+  ECS_CLUSTER: app_cluster_3
+  CONTAINER_NAME: app_3
+  ECS_SERVICE: app_service_3
+  ECS_TD: .github/workflows/td.json
 
 jobs:
-  DeployApplicationChanges:
-    name: "Deploy Application Changes"
+  deploy:
+    name: Deploy
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: ./app
-
+    environment: dev
     steps:
-      - name: Checkout Repository 📦
+      - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Configure AWS Credentials 🔑
-        uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-2
-
-      - name: Setup Terraform 🏗
-        uses: hashicorp/setup-terraform@v2.0.3
-        with:
-          terraform_version: 1.0.8
-          terraform_wrapper: false # Necessary to access output
-
-      - name: Terraform Init ✨
-        id: init
-        run: terraform init
-        working-directory: ./terraform
-
-      - name: Setup Node 🏗
-        uses: actions/setup-node@v3
-        with:
-          node-version: "14"
-
-      - name: Generate ECS Task Definition
-        id: apply-partial
-        run: terraform apply -auto-approve -target=template_dir.task_definition
-        working-directory: ./terraform
-
-      - name: Save ECR name to Environment Variables
-        run: echo "ECR_NAME=$(terraform output -raw ecr_repository_name)" >> $GITHUB_ENV
-        working-directory: ./terraform
-
-      - name: Install packages
-        run: npm ci
-
-      - name: Compile project
-        run: npm run compile
-
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_KEY_SECRET }}
+          aws-region: "ap-south-1"
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Build, tag, and push image to Amazon ECR 🏷
+      - name: Build, tag, and push image to Amazon ECR
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ env.ECR_NAME }}
+          ECR_REPOSITORY: docker-nodejs-demo
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-        working-directory: ./app
+     
 
-      - name: Fill in the new image ID in the Amazon ECS task definition ✒
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v1
         with:
-          task-definition: ./terraform/rendered/task-definition.json
-          container-name: container-definition
-          image: ${{ steps.build-image.outputs.image }}
+          terraform_version: 1.0.5
 
-      - name: Deploy Amazon ECS task definition 🚀
+      - name: Terraform Init
+        env:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_KEY_SECRET }}
+        run: terraform init
+
+      - name: Terraform Apply
+        id: terraform
+        env:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_KEY_SECRET }}
+        run: |
+          terraform apply -auto-approve -var container_image=${{ github.sha }}
+
+      - name: Deploy Amazon ECS task definition
+        id: terraformx
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
         with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ecs-service
-          cluster: ecs-cluster
-          wait-for-service-stability: true
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: false
+
+      - name: Wait for 3 minutes
+        run: sleep 180
+      
+      - name: Terraform Destroy
+        run: terraform apply -destroy -auto-approve
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_SECRET }}
